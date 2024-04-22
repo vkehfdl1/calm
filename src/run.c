@@ -431,6 +431,7 @@ void error_usage() {
 	fprintf(stderr, "  -i <string> input prompt (- to read from stdin)\n");
 	fprintf(stderr, "  -x <path>   compute perplexity for text file\n");
 	fprintf(stderr, "  -y <string> chat mode with a system prompt\n");
+	fprintf(stderr, "  -m <path>   text file for input multiple prompts at once\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -447,6 +448,7 @@ int main(int argc, char* argv[]) {
 	char* system_prompt = NULL;      // chat system prompt
 	unsigned long long rng_seed = 0; // seed rng with time by default
 	int context = 0;                 // context length
+	char* prompt_path = NULL;        // text file path for multiple prompts at once
 
 	// poor man's C argparse so we can override the defaults above from the command line
 	if (argc >= 2) {
@@ -484,6 +486,8 @@ int main(int argc, char* argv[]) {
 			context = atoi(argv[i + 1]);
 		} else if (argv[i][1] == 'y') {
 			system_prompt = argv[i + 1];
+		} else if (argv[i][1] == 'm') {
+			prompt_path = argv[i + 1];
 		} else {
 			error_usage();
 		}
@@ -620,6 +624,18 @@ int main(int argc, char* argv[]) {
 		study(&transformer, &tokenizer, perplexity, steps);
 	} else if (system_prompt) {
 		chat(&transformer, &tokenizer, &sampler, prompt, system_prompt);
+	} else if (prompt_path) {
+		FILE *file = fopen(prompt_path, "r");
+		if (!file) {
+			fprintf(stderr, "failed to open %s\n", prompt_path);
+			exit(EXIT_FAILURE);
+		}
+
+		char line[steps]; // Adjust size as needed
+		while (fgets(line, sizeof(line), file)) {
+			generate(&transformer, &tokenizer, &sampler, line, steps, pos_offset);
+		}
+		fclose(file);
 	} else {
 		for (int s = 0; s < sequences; ++s) {
 			generate(&transformer, &tokenizer, &sampler, prompt, steps, pos_offset);

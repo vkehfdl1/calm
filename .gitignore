@@ -11,3 +11,5 @@ build/
 *.ncu-rep
 perf.data*
 *.gputrace/
+
+.idea/
