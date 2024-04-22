@@ -32,10 +32,11 @@ async def process_batch(tasks, batch_size: int = 64) -> List[Any]:
 
 @click.command()
 @click.option('--result_file', type=click.Path(dir_okay=False, exists=True))
+@click.option('--output_file', type=click.Path(dir_okay=False, exists=False))
 @click.option('--batch_size', type=int, default=8)
-def scoring(result_file, batch_size: int):
+def scoring(result_file, output_file: str, batch_size: int):
     outputs = []
-    with open(result_file, 'r') as file:
+    with open(result_file, 'r', encoding="ISO-8859-1") as file:
         for line in file:
             json_obj = json.loads(line)
             outputs.append(json_obj['content'])
@@ -55,7 +56,7 @@ def scoring(result_file, batch_size: int):
 
     print(f"GPT-4 scoring time: {end_time - start_time:.3f}초 걸림")
 
-    df['score_raw'] = s
+    df = pd.DataFrame({'output': outputs, 'score_raw': s})
 
     # 문자가 있으면 다 날림
     df['score'] = df['score_raw'].str.replace('[^0-9]', '', regex=True)
@@ -64,6 +65,7 @@ def scoring(result_file, batch_size: int):
 
     display_score(df)
 
+    df.to_csv(output_file, index=False)
     return df
 
 
