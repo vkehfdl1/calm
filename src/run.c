@@ -192,7 +192,6 @@ size_t kvcache_bandwidth(struct Config* config, int kvbits, int pos) {
 
 char* generate(struct Transformer* transformer, struct Tokenizer* tokenizer, struct Sampler* sampler, char* prompt, int steps, int pos_offset) {
 	char* empty_prompt = "";
-	size_t input_length = strlen(prompt);
 	if (prompt == NULL) {
 		prompt = empty_prompt;
 	}
@@ -274,7 +273,6 @@ char* generate(struct Transformer* transformer, struct Tokenizer* tokenizer, str
 
 	char* result = (char*)malloc(sizeof(final_result));
 	strcpy(result, final_result);
-	strcpy(result, result + input_length);
 
 	return result;
 }
