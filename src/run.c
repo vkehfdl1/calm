@@ -656,19 +656,38 @@ int main(int argc, char* argv[]) {
 			fprintf(stderr, "failed to open %s\n", prompt_path);
 			exit(EXIT_FAILURE);
 		}
-
+		char** result = NULL;
+		size_t result_size = 0;
+		size_t result_capacity = 0;
 		char line[steps]; // Adjust size as needed
-
-		char* result[] = {};
-		int i = 0;
 		while (fgets(line, sizeof(line), file)) {
 			char* output = generate(&transformer, &tokenizer, &sampler, line, steps, pos_offset);
-			result[i] = output;
-			i++;
+
+			// Check if we need to expand the array
+			if (result_size >= result_capacity) {
+				size_t new_capacity = result_capacity == 0 ? 1 : result_capacity * 2;
+				char** new_result = realloc(result, new_capacity * sizeof(char*));
+				if (!new_result) {
+					perror("Failed to allocate memory for result");
+					// Clean up already allocated memory
+					for (size_t i = 0; i < result_size; i++) {
+						free(result[i]);
+					}
+					free(result);
+					fclose(file);
+					return EXIT_FAILURE;
+				}
+				result = new_result;
+				result_capacity = new_capacity;
+			}
+
+			result[result_size++] = output;
 		}
+
 		fclose(file);
 
-		write_jsonl(result, i, output_path);
+
+		write_jsonl(result, result_size, output_path);
 
 	} else {
 		for (int s = 0; s < sequences; ++s) {
