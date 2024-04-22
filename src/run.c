@@ -33,6 +33,29 @@ void* upload_metal(void* host, size_t size);
 void prepare_metal(struct Transformer* transformer);
 float* forward_metal(struct Transformer* transformer, int token, int pos, unsigned flags);
 
+
+char* escape_json_string(const char* str) {
+	if (str == NULL) return NULL;
+	size_t len = strlen(str);
+	char* escaped = malloc(len * 2 + 1); // Allocate maximum needed space
+	char* p = escaped;
+
+	for (size_t i = 0; i < len; i++) {
+		switch (str[i]) {
+		case '\"': *p++ = '\\'; *p++ = '\"'; break;
+		case '\\': *p++ = '\\'; *p++ = '\\'; break;
+		case '\b': *p++ = '\\'; *p++ = 'b'; break;
+		case '\f': *p++ = '\\'; *p++ = 'f'; break;
+		case '\n': *p++ = '\\'; *p++ = 'n'; break;
+		case '\r': *p++ = '\\'; *p++ = 'r'; break;
+		case '\t': *p++ = '\\'; *p++ = 't'; break;
+		default: *p++ = str[i]; break;
+		}
+	}
+	*p = '\0';
+	return escaped;
+}
+
 void write_jsonl(char** strings, size_t count, const char* filename) {
 	FILE* file = fopen(filename, "w");
 	if (!file) {
@@ -41,7 +64,8 @@ void write_jsonl(char** strings, size_t count, const char* filename) {
 	}
 
 	for (size_t i = 0; i < count; i++) {
-		fprintf(file, "{\"index\": %zu, \"content\": \"%s\"}\n", i, strings[i]);
+		char* escaped_string = escape_json_string(strings[i]);
+		fprintf(file, "{\"index\": %zu, \"content\": \"%s\"}\n", i, escaped_string);
 	}
 
 	fclose(file);
