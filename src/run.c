@@ -661,7 +661,9 @@ int main(int argc, char* argv[]) {
 		size_t result_capacity = 0;
 		char line[steps]; // Adjust size as needed
 		while (fgets(line, sizeof(line), file)) {
-			char* output = generate(&transformer, &tokenizer, &sampler, line, steps, pos_offset);
+			char input_prompt[steps];
+			sprintf(input_prompt, chatframe(&tokenizer, false), line);
+			char* output = generate(&transformer, &tokenizer, &sampler, input_prompt, steps, pos_offset);
 
 			// Check if we need to expand the array
 			if (result_size >= result_capacity) {
