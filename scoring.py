@@ -1,4 +1,3 @@
-import asyncio
 import time
 
 import openai
@@ -10,7 +9,27 @@ from src.util import process_batch
 import json
 
 import click
+import asyncio
+from typing import List, Any
 
+
+async def process_batch(tasks, batch_size: int = 64) -> List[Any]:
+    """
+    Processes tasks in batches asynchronously.
+
+    :param tasks: A list of no-argument functions or coroutines to be executed.
+    :param batch_size: The number of tasks to process in a single batch.
+        Default is 64.
+    :return: A list of results from the processed tasks.
+    """
+    results = []
+
+    for i in range(0, len(tasks), batch_size):
+        batch = tasks[i:i + batch_size]
+        batch_results = await asyncio.gather(*batch)
+        results.extend(batch_results)
+
+    return results
 
 @click.command()
 @click.option('--result_file', type=click.Path(dir_okay=False, exists=True))
