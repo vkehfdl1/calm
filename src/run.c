@@ -33,6 +33,20 @@ void* upload_metal(void* host, size_t size);
 void prepare_metal(struct Transformer* transformer);
 float* forward_metal(struct Transformer* transformer, int token, int pos, unsigned flags);
 
+void write_jsonl(char** strings, size_t count, const char* filename) {
+	FILE* file = fopen(filename, "w");
+	if (!file) {
+		perror("Failed to open file");
+		return;
+	}
+
+	for (size_t i = 0; i < count; i++) {
+		fprintf(file, "{\"index\": %zu, \"content\": \"%s\"}\n", i, strings[i]);
+	}
+
+	fclose(file);
+}
+
 void get_config(struct Config* config, struct Tensors* tensors, int context) {
 	config->dim = atoi(tensors_metadata(tensors, "dim"));
 	config->hidden_dim = atoi(tensors_metadata(tensors, "hidden_dim"));
@@ -176,7 +190,7 @@ size_t kvcache_bandwidth(struct Config* config, int kvbits, int pos) {
 // ----------------------------------------------------------------------------
 // generation loop
 
-void generate(struct Transformer* transformer, struct Tokenizer* tokenizer, struct Sampler* sampler, char* prompt, int steps, int pos_offset) {
+char* generate(struct Transformer* transformer, struct Tokenizer* tokenizer, struct Sampler* sampler, char* prompt, int steps, int pos_offset) {
 	char* empty_prompt = "";
 	if (prompt == NULL) {
 		prompt = empty_prompt;
@@ -213,6 +227,8 @@ void generate(struct Transformer* transformer, struct Tokenizer* tokenizer, stru
 		fflush(stdout);
 	}
 
+	char final_result[65536] = "";
+
 	while (pos < steps || steps < 0) {
 		// forward the transformer to get logits for the next token
 		unsigned flags = pos < num_prompt_tokens - 1 ? FF_UPDATE_KV_ONLY : 0;
@@ -239,6 +255,7 @@ void generate(struct Transformer* transformer, struct Tokenizer* tokenizer, stru
 
 		// print the token as string, decode it with the Tokenizer object
 		char* piece = tokenizer_decode(tokenizer, token, next);
+		strcat(final_result, piece);
 		printf("%s", piece);
 		fflush(stdout);
 		token = next;
@@ -253,6 +270,11 @@ void generate(struct Transformer* transformer, struct Tokenizer* tokenizer, stru
 	        (double)(end - start) / 1000);
 
 	free(prompt_tokens);
+
+	char* result = (char*)malloc(sizeof(final_result));
+	strcpy(result, final_result);
+
+	return result;
 }
 
 void study(struct Transformer* transformer, struct Tokenizer* tokenizer, const char* path, int steps) {
@@ -432,6 +454,7 @@ void error_usage() {
 	fprintf(stderr, "  -x <path>   compute perplexity for text file\n");
 	fprintf(stderr, "  -y <string> chat mode with a system prompt\n");
 	fprintf(stderr, "  -m <path>   text file for input multiple prompts at once\n");
+	fprintf(stderr, "  -o <path>   jsonl file for saving output from prompts\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -449,6 +472,7 @@ int main(int argc, char* argv[]) {
 	unsigned long long rng_seed = 0; // seed rng with time by default
 	int context = 0;                 // context length
 	char* prompt_path = NULL;        // text file path for multiple prompts at once
+	char* output_path = NULL;        // output jsonl path for multiple prompts output
 
 	// poor man's C argparse so we can override the defaults above from the command line
 	if (argc >= 2) {
@@ -488,6 +512,8 @@ int main(int argc, char* argv[]) {
 			system_prompt = argv[i + 1];
 		} else if (argv[i][1] == 'm') {
 			prompt_path = argv[i + 1];
+		} else if(argv[i][1] == 'o') {
+			output_path = argv[i + 1];
 		} else {
 			error_usage();
 		}
@@ -625,17 +651,25 @@ int main(int argc, char* argv[]) {
 	} else if (system_prompt) {
 		chat(&transformer, &tokenizer, &sampler, prompt, system_prompt);
 	} else if (prompt_path) {
-		FILE *file = fopen(prompt_path, "r");
+		FILE* file = fopen(prompt_path, "r");
 		if (!file) {
 			fprintf(stderr, "failed to open %s\n", prompt_path);
 			exit(EXIT_FAILURE);
 		}
 
 		char line[steps]; // Adjust size as needed
+
+		char* result[] = {};
+		int i = 0;
 		while (fgets(line, sizeof(line), file)) {
-			generate(&transformer, &tokenizer, &sampler, line, steps, pos_offset);
+			char* output = generate(&transformer, &tokenizer, &sampler, line, steps, pos_offset);
+			result[i] = output;
+			i++;
 		}
 		fclose(file);
+
+		write_jsonl(result, i, output_path);
+
 	} else {
 		for (int s = 0; s < sequences; ++s) {
 			generate(&transformer, &tokenizer, &sampler, prompt, steps, pos_offset);
