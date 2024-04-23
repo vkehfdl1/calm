@@ -34,22 +34,54 @@ void prepare_metal(struct Transformer* transformer);
 float* forward_metal(struct Transformer* transformer, int token, int pos, unsigned flags);
 
 
+typedef struct {
+	struct Transformer transformer;
+	struct Tokenizer tokenizer;
+	struct Sampler sampler;
+	int pos_offset;
+} Model;
+
+
 char* escape_json_string(const char* str) {
-	if (str == NULL) return NULL;
+	if (str == NULL)
+		return NULL;
 	size_t len = strlen(str);
 	char* escaped = malloc(len * 2 + 1); // Allocate maximum needed space
 	char* p = escaped;
 
 	for (size_t i = 0; i < len; i++) {
 		switch (str[i]) {
-		case '\"': *p++ = '\\'; *p++ = '\"'; break;
-		case '\\': *p++ = '\\'; *p++ = '\\'; break;
-		case '\b': *p++ = '\\'; *p++ = 'b'; break;
-		case '\f': *p++ = '\\'; *p++ = 'f'; break;
-		case '\n': *p++ = '\\'; *p++ = 'n'; break;
-		case '\r': *p++ = '\\'; *p++ = 'r'; break;
-		case '\t': *p++ = '\\'; *p++ = 't'; break;
-		default: *p++ = str[i]; break;
+		case '\"':
+			*p++ = '\\';
+			*p++ = '\"';
+			break;
+		case '\\':
+			*p++ = '\\';
+			*p++ = '\\';
+			break;
+		case '\b':
+			*p++ = '\\';
+			*p++ = 'b';
+			break;
+		case '\f':
+			*p++ = '\\';
+			*p++ = 'f';
+			break;
+		case '\n':
+			*p++ = '\\';
+			*p++ = 'n';
+			break;
+		case '\r':
+			*p++ = '\\';
+			*p++ = 'r';
+			break;
+		case '\t':
+			*p++ = '\\';
+			*p++ = 't';
+			break;
+		default:
+			*p++ = str[i];
+			break;
 		}
 	}
 	*p = '\0';
@@ -482,6 +514,131 @@ void error_usage() {
 	exit(EXIT_FAILURE);
 }
 
+Model load_model(char* checkpoint_path, int context, int steps, unsigned long long rng_seed, float temperature, float minp) {
+#ifdef __linux__
+	char* cpu = getenv("CALM_CPU");
+	bool cuda = !cpu || atoi(cpu) == 0;
+#endif
+
+#ifdef __APPLE__
+	char* cpu = getenv("CALM_CPU");
+	bool metal = !cpu || atoi(cpu) == 0;
+#endif
+
+	// read .safetensors model
+	struct Tensors tensors = {};
+	if (tensors_open(&tensors, checkpoint_path) != 0) {
+		fprintf(stderr, "failed to open %s\n", checkpoint_path);
+		exit(EXIT_FAILURE);
+	}
+
+	// build transformer using tensors from the input model file
+	struct Transformer transformer = {};
+	get_config(&transformer.config, &tensors, context);
+	transformer.n_bytes = count_bytes(&tensors, "model.", NULL, &transformer.n_params);
+	transformer.n_bandwidth = transformer.n_bytes - count_bytes(&tensors, "model.embed.", NULL, NULL);
+	if (tensors_find(&tensors, "model.output.weight", 0) == NULL) {
+		transformer.n_bandwidth += tensors_find(&tensors, "model.embed.weight", 0)->size;
+	}
+	if (transformer.config.n_experts) {
+		size_t mlp = count_bytes(&tensors, "model.layers.", ".mlp.w", NULL);
+		transformer.n_bandwidth -= mlp;
+		transformer.n_bandwidth += mlp / transformer.config.n_experts * transformer.config.n_experts_ac;
+	}
+
+	transformer.state.kvbits = 16;
+
+#ifdef __linux__
+	if (cuda && transformer.config.seq_len > 4096) {
+		transformer.state.kvbits = 8; // for now use fp8 for larger contexts automatically without explicit control
+	}
+#endif
+
+	printf("# %s: %.1fB params (%.1f GiB @ %.2f bpw), %d context (kvcache %.1f GiB @ fp%d)\n",
+	       checkpoint_path,
+	       (double)transformer.n_params / 1e9, (double)transformer.n_bytes / 1024 / 1024 / 1024,
+	       (double)transformer.n_bytes * 8 / (double)transformer.n_params,
+	       transformer.config.seq_len,
+	       (double)kvcache_bandwidth(&transformer.config, transformer.state.kvbits, transformer.config.seq_len - 1) / 1024 / 1024 / 1024,
+	       transformer.state.kvbits);
+
+#ifdef __linux__
+	// upload tensors to the GPU
+	if (cuda) {
+		int i;
+		for (i = 0; i < tensors.n_tensors; ++i) {
+			struct Tensor* tensor = &tensors.tensors[i];
+			if (strncmp(tensor->name, "model.", 6) == 0) {
+				tensor->data = upload_cuda(tensor->data, tensor->size);
+			}
+		}
+	}
+#endif
+
+#ifdef __APPLE__
+	// upload tensors to the GPU
+	if (metal) {
+		init_metal();
+		for (int i = 0; i < tensors.n_tensors; ++i) {
+			struct Tensor* tensor = &tensors.tensors[i];
+			if (strncmp(tensor->name, "model.", 6) == 0) {
+				tensor->data = upload_metal(tensor->data, tensor->size);
+			}
+		}
+	}
+#endif
+
+	get_weights(&transformer.config, &transformer.weights, &tensors);
+
+#ifdef __linux__
+	if (cuda) {
+		prepare_cuda(&transformer);
+		transformer.forward = forward_cuda;
+	}
+#endif
+
+#ifdef __APPLE__
+	if (metal) {
+		prepare_metal(&transformer);
+		transformer.forward = forward_metal;
+	}
+#endif
+
+	// CPU fallback
+	if (!transformer.forward) {
+		prepare(&transformer);
+		transformer.forward = forward;
+	}
+
+	// build the Tokenizer via the tokenizer .bin file
+	struct Tokenizer tokenizer;
+	build_tokenizer(&tokenizer, &tensors, transformer.config.vocab_size);
+
+	// build the Sampler
+	struct Sampler sampler = {transformer.config.vocab_size, rng_seed, temperature, minp};
+
+	// hack for profiling: offset pos to make sure we need to use most of kv cache
+	char* pos_offset_env = getenv("CALM_POSO");
+	int pos_offset = pos_offset_env ? atoi(pos_offset_env) : 0;
+
+	// do one inference as warmup
+	// when using cpu, this makes sure tensors are loaded into memory (via mmap)
+	// when using cuda, this makes sure all kernels are compiled and instantiated
+	transformer.forward(&transformer, 0, pos_offset, 0);
+
+	// -n 0 means use the full context length
+	if (steps == 0)
+		steps = transformer.config.seq_len;
+
+	Model model;
+	model.transformer = transformer;
+	model.tokenizer = tokenizer;
+	model.sampler = sampler;
+	model.pos_offset = pos_offset;
+	return model;
+}
+
+
 int main(int argc, char* argv[]) {
 
 	// default parameters
@@ -536,7 +693,7 @@ int main(int argc, char* argv[]) {
 			system_prompt = argv[i + 1];
 		} else if (argv[i][1] == 'm') {
 			prompt_path = argv[i + 1];
-		} else if(argv[i][1] == 'o') {
+		} else if (argv[i][1] == 'o') {
 			output_path = argv[i + 1];
 		} else {
 			error_usage();
@@ -711,7 +868,6 @@ int main(int argc, char* argv[]) {
 		}
 
 		fclose(file);
-
 
 		write_jsonl(result, result_size, output_path);
 
